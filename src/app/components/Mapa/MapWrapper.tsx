@@ -1,10 +1,15 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import { LoadingSpinner } from "@/app/components/ui/LoadingSpinner"; // Crie este componente ou use um div simples
 
-// Carrega o componente do mapa DINAMICAMENTE (apenas no cliente)
 const MapaComponent = dynamic(() => import("./index"), {
-  ssr: false, // Desativa renderização no servidor // Exibe um spinner enquanto carrega
+  ssr: false,
+  loading: () => (
+    <div className="h-[500px] flex items-center justify-center bg-[#002B40]">
+      <LoadingSpinner />
+    </div>
+  ),
 });
 
 export default function MapWrapper() {
