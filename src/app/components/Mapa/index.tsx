@@ -200,33 +200,25 @@ export default function MapaAcessivel() {
         return prev;
       });
 
-      // Lógica de alertas de voz progressivos
-      const textoAlerta = `Semáforo ${semaforo.nome} a ${distanciaArredondada} metros ${direcao}`;
+      // Lógica de alertas de voz progressivos - CORRIGIDO
+      const textoBase = `${semaforo.nome} a ${distanciaArredondada} metros ${direcao}`;
+      const textoUrgente = `ATENÇÃO! ${textoBase}`;
 
-      // Verifica se deve falar o alerta
+      // Verifica se deve falar o alerta - CORRIGIDO
       const deveFalar =
-        // Se ainda não falou nada
         !ultimoAlertaRef.current ||
-        // Se mudou de semáforo
-        ultimoAlertaRef.current.texto !== textoAlerta ||
-        // Se está muito perto (fala sempre)
+        ultimoAlertaRef.current.distancia !== distanciaArredondada ||
         proximidade === "muito_perto" ||
-        // Se está perto (fala a cada 5 metros)
         (proximidade === "perto" && distanciaArredondada % 5 === 0) ||
-        // Se está se aproximando (fala a cada 10 metros)
         (proximidade === "aproximando" && distanciaArredondada % 10 === 0) ||
-        // Se está distante (fala a cada 25 metros)
         (proximidade === "distante" && distanciaArredondada % 25 === 0);
 
       if (deveFalar) {
-        falar(
-          proximidade === "muito_perto"
-            ? `ATENÇÃO! ${textoAlerta}`
-            : textoAlerta,
-          proximidade === "muito_perto"
-        );
+        const textoFalar =
+          proximidade === "muito_perto" ? textoUrgente : textoBase;
+        falar(textoFalar, proximidade === "muito_perto");
         ultimoAlertaRef.current = {
-          texto: textoAlerta,
+          texto: textoBase, // Armazena apenas o texto base sem "ATENÇÃO!"
           distancia: distanciaArredondada,
         };
       }
