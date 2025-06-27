@@ -1,12 +1,11 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from "react";
-import { ButtonVoltar } from "@/app/components/ButtonVoltar";
 import { LoadScript, GoogleMap, Marker, Circle } from "@react-google-maps/api";
 
 const containerStyle = {
   width: "100%",
-  height: "70vh",
+  height: "80vh",
 };
 
 const SEMAFOROS = [
@@ -22,246 +21,454 @@ const SEMAFOROS = [
   },
 ] as const;
 
-type Posicao = {
-  lat: number;
-  lng: number;
+type Posicao = { lat: number; lng: number };
+type StatusSemaforo = {
+  nome: string;
+  distancia: number;
+  direcao: string;
+  proximidade: "distante" | "aproximando" | "perto" | "muito_perto";
 };
 
 export default function MapaAcessivel() {
-  const [posicao, setPosicao] = useState<Posicao | null>(null);
+  const [posicao, setPosicao] = useState<Posicao>({
+    lat: -22.2231,
+    lng: -54.8124,
+  });
   const [map, setMap] = useState<google.maps.Map | null>(null);
-  const [distanciaProxima, setDistanciaProxima] = useState<number>(Infinity);
-  const ultimoAlerta = useRef<string | null>(null);
-  const watchId = useRef<number | null>(null);
-  const [isApiLoaded, setIsApiLoaded] = useState(false);
-  const [loadingPosition, setLoadingPosition] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [alertaAtual, setAlertaAtual] = useState<StatusSemaforo | null>(null);
+  const [modoTeste, setModoTeste] = useState(false);
+  const [velocidade, setVelocidade] = useState(0.0001);
+  const [mapLoaded, setMapLoaded] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const intervaloRef = useRef<NodeJS.Timeout | null>(null);
+  const ultimoAlertaRef = useRef<{ texto: string; distancia: number } | null>(
+    null
+  );
+  const ultimaFalaRef = useRef<number>(0);
 
-  // Função para criar ícone seguro
-  const criarIcone = useCallback(
-    (url: string): google.maps.Icon | undefined => {
-      if (!window.google) return undefined;
-      return {
-        url,
-        scaledSize: new window.google.maps.Size(32, 32),
+  // Função de voz aprimorada
+  const falar = useCallback(
+    (texto: string, urgente = false) => {
+      const agora = Date.now();
+      if (isSpeaking || agora - ultimaFalaRef.current < 2000) return;
+
+      setIsSpeaking(true);
+      ultimaFalaRef.current = agora;
+      window.speechSynthesis.cancel();
+
+      const utterance = new SpeechSynthesisUtterance(texto);
+      utterance.lang = "pt-BR";
+      utterance.rate = urgente ? 1.1 : 0.9;
+      utterance.pitch = urgente ? 1.5 : 1.2;
+
+      utterance.onend = () => {
+        setIsSpeaking(false);
       };
+
+      window.speechSynthesis.speak(utterance);
+    },
+    [isSpeaking]
+  );
+
+  // Funções de movimento
+  const mover = useCallback(
+    (direcao: "cima" | "baixo" | "esquerda" | "direita") => {
+      setPosicao((prev) => {
+        const incremento = velocidade;
+        const novaPos: Posicao = { ...prev };
+
+        switch (direcao) {
+          case "cima":
+            novaPos.lat += incremento;
+            break;
+          case "baixo":
+            novaPos.lat -= incremento;
+            break;
+          case "esquerda":
+            novaPos.lng -= incremento;
+            break;
+          case "direita":
+            novaPos.lng += incremento;
+            break;
+        }
+
+        if (map) map.panTo(novaPos);
+        return novaPos;
+      });
+    },
+    [velocidade, map]
+  );
+
+  // Calcula direção relativa melhorada
+  const getDirecaoRelativa = useCallback(
+    (pos1: Posicao, pos2: Posicao): string => {
+      const dx = pos2.lng - pos1.lng;
+      const dy = pos2.lat - pos1.lat;
+      const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+
+      if (angle > -30 && angle <= 30) return "à sua direita";
+      if (angle > 30 && angle <= 60) return "à sua frente e direita";
+      if (angle > 60 && angle <= 120) return "à sua frente";
+      if (angle > 120 && angle <= 150) return "à sua frente e esquerda";
+      if (angle > 150 || angle <= -150) return "à sua esquerda";
+      if (angle > -150 && angle <= -120) return "atrás e à esquerda";
+      if (angle > -120 && angle <= -60) return "atrás";
+      return "atrás e à direita";
     },
     []
   );
 
-  // Função para calcular distância
-  const calcularDistancia = useCallback(
-    (pos1: Posicao, pos2: Posicao): number => {
-      if (!isApiLoaded || !window.google) return Infinity;
-      return window.google.maps.geometry.spherical.computeDistanceBetween(
-        new window.google.maps.LatLng(pos1),
-        new window.google.maps.LatLng(pos2)
-      );
-    },
-    [isApiLoaded]
-  );
-
-  // Função de voz
-  const falar = useCallback((texto: string) => {
-    if ("speechSynthesis" in window) {
-      const utterance = new SpeechSynthesisUtterance(texto);
-      utterance.lang = "pt-BR";
-      window.speechSynthesis.cancel();
-      window.speechSynthesis.speak(utterance);
-      ultimoAlerta.current = texto;
-    }
-  }, []);
-
-  // Obter e monitorar localização em tempo real
+  // Configura controles de teclado
   useEffect(() => {
-    if (!isApiLoaded) return;
+    if (!modoTeste) return;
 
-    const opcoes = {
-      enableHighAccuracy: true, // Usar GPS quando disponível
-      timeout: 10000, // Tempo máximo de espera
-      maximumAge: 0, // Sem cache de posição
-    };
-
-    const successCallback = (position: GeolocationPosition) => {
-      const newPos = {
-        lat: position.coords.latitude,
-        lng: position.coords.longitude,
-      };
-      setPosicao(newPos);
-      setLoadingPosition(false);
-      setError(null);
-
-      if (map) {
-        map.panTo(newPos);
+    const handleKeyDown = (e: KeyboardEvent) => {
+      switch (e.key) {
+        case "ArrowUp":
+          mover("cima");
+          break;
+        case "ArrowDown":
+          mover("baixo");
+          break;
+        case "ArrowLeft":
+          mover("esquerda");
+          break;
+        case "ArrowRight":
+          mover("direita");
+          break;
       }
     };
 
-    const errorCallback = (err: GeolocationPositionError) => {
-      console.error("Erro de geolocalização:", err);
-      setLoadingPosition(false);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [modoTeste, mover]);
 
-      // Mensagens de erro mais descritivas
-      const errorMessages = {
-        1: "Permissão de localização negada",
-        2: "Localização indisponível",
-        3: "Tempo de solicitação excedido",
-      };
+  // Monitora posição e verifica semáforos próximos com alertas progressivos
+  useEffect(() => {
+    if (!map || !mapLoaded) return;
 
-      setError(
-        errorMessages[err.code as keyof typeof errorMessages] ||
-          "Erro ao obter localização"
+    const verificarProximidade = () => {
+      // Encontra o semáforo mais próximo
+      const { semaforo, distancia } = SEMAFOROS.reduce<{
+        semaforo: (typeof SEMAFOROS)[number];
+        distancia: number;
+      }>(
+        (closest, current) => {
+          const dist =
+            window.google.maps.geometry.spherical.computeDistanceBetween(
+              new window.google.maps.LatLng(posicao),
+              new window.google.maps.LatLng(current.position)
+            );
+          return dist < closest.distancia
+            ? { semaforo: current, distancia: dist }
+            : closest;
+        },
+        { semaforo: SEMAFOROS[0], distancia: Infinity }
       );
 
-      // Fallback para coordenadas padrão se a geolocalização falhar
-      if (!posicao) {
-        setPosicao({ lat: -22.2231, lng: -54.8124 });
+      const distanciaArredondada = Math.round(distancia);
+      const direcao = getDirecaoRelativa(posicao, semaforo.position);
+
+      // Determina o nível de proximidade
+      const proximidade: StatusSemaforo["proximidade"] =
+        distancia < 5
+          ? "muito_perto"
+          : distancia < 10
+          ? "perto"
+          : distancia < 50
+          ? "aproximando"
+          : "distante";
+
+      // Atualiza o estado do alerta
+      setAlertaAtual((prev) => {
+        const novoAlerta = {
+          nome: semaforo.nome,
+          distancia: distanciaArredondada,
+          direcao,
+          proximidade,
+        };
+
+        // Só atualiza se houver mudança significativa
+        if (
+          !prev ||
+          prev.nome !== novoAlerta.nome ||
+          Math.abs(prev.distancia - novoAlerta.distancia) > 2 ||
+          prev.proximidade !== novoAlerta.proximidade
+        ) {
+          return novoAlerta;
+        }
+        return prev;
+      });
+
+      // Lógica de alertas de voz progressivos
+      const textoAlerta = `Semáforo ${semaforo.nome} a ${distanciaArredondada} metros ${direcao}`;
+
+      // Verifica se deve falar o alerta
+      const deveFalar =
+        // Se ainda não falou nada
+        !ultimoAlertaRef.current ||
+        // Se mudou de semáforo
+        ultimoAlertaRef.current.texto !== textoAlerta ||
+        // Se está muito perto (fala sempre)
+        proximidade === "muito_perto" ||
+        // Se está perto (fala a cada 5 metros)
+        (proximidade === "perto" && distanciaArredondada % 5 === 0) ||
+        // Se está se aproximando (fala a cada 10 metros)
+        (proximidade === "aproximando" && distanciaArredondada % 10 === 0) ||
+        // Se está distante (fala a cada 25 metros)
+        (proximidade === "distante" && distanciaArredondada % 25 === 0);
+
+      if (deveFalar) {
+        falar(
+          proximidade === "muito_perto"
+            ? `ATENÇÃO! ${textoAlerta}`
+            : textoAlerta,
+          proximidade === "muito_perto"
+        );
+        ultimoAlertaRef.current = {
+          texto: textoAlerta,
+          distancia: distanciaArredondada,
+        };
       }
     };
 
-    // Primeiro tenta obter a posição atual rapidamente
-    navigator.geolocation.getCurrentPosition(
-      successCallback,
-      errorCallback,
-      opcoes
-    );
-
-    // Depois configura o monitoramento contínuo
-    watchId.current = navigator.geolocation.watchPosition(
-      successCallback,
-      errorCallback,
-      opcoes
-    );
-
+    intervaloRef.current = setInterval(verificarProximidade, 500);
     return () => {
-      if (watchId.current) {
-        navigator.geolocation.clearWatch(watchId.current);
-      }
+      if (intervaloRef.current) clearInterval(intervaloRef.current);
     };
-  }, [isApiLoaded, map]);
+  }, [posicao, map, getDirecaoRelativa, mapLoaded, falar]);
 
-  // Monitorar proximidade com semáforos
-  useEffect(() => {
-    if (!map || !posicao || !isApiLoaded) return;
+  // Função para criar um Size do Google Maps de forma segura
+  const createGoogleMapsSize = (width: number, height: number) => {
+    if (!window.google || !window.google.maps) return undefined;
+    return new window.google.maps.Size(width, height);
+  };
 
-    let menorDistancia = Infinity;
-    SEMAFOROS.forEach((semaforo) => {
-      const dist = calcularDistancia(posicao, semaforo.position);
-      if (dist < menorDistancia) menorDistancia = dist;
-      if (dist < 30) {
-        falar(`Atenção: ${semaforo.nome} à ${Math.round(dist)} metros`);
-      }
-    });
-    setDistanciaProxima(menorDistancia);
-  }, [posicao, map, calcularDistancia, falar, isApiLoaded]);
+  // Estilo moderno para o mapa
+  const mapStyles = [
+    {
+      featureType: "poi",
+      elementType: "labels",
+      stylers: [{ visibility: "off" }],
+    },
+    {
+      featureType: "transit",
+      elementType: "labels",
+      stylers: [{ visibility: "off" }],
+    },
+    {
+      featureType: "road",
+      elementType: "labels",
+      stylers: [{ visibility: "simplified" }],
+    },
+  ];
 
-  const repetirAlerta = useCallback(() => {
-    if (ultimoAlerta.current) falar(ultimoAlerta.current);
-  }, [falar]);
+  // Função para determinar a cor do alerta baseado na proximidade
+  const getAlertColor = (proximidade: StatusSemaforo["proximidade"]) => {
+    switch (proximidade) {
+      case "muito_perto":
+        return "bg-red-600 animate-pulse";
+      case "perto":
+        return "bg-orange-500";
+      case "aproximando":
+        return "bg-yellow-500";
+      case "distante":
+        return "bg-blue-600";
+      default:
+        return "bg-blue-600";
+    }
+  };
+
+  // Função para determinar o texto do alerta baseado na proximidade
+  const getAlertText = (proximidade: StatusSemaforo["proximidade"]) => {
+    switch (proximidade) {
+      case "muito_perto":
+        return "ATENÇÃO! Próximo ao semáforo";
+      case "perto":
+        return "Próximo ao semáforo";
+      case "aproximando":
+        return "Aproximando-se do semáforo";
+      case "distante":
+        return "Semáforo à vista";
+      default:
+        return "Semáforo na área";
+    }
+  };
 
   return (
-    <main className="flex flex-col items-center min-h-screen text-white text-center p-4 relative bg-gray-900">
-      <div className="absolute top-4 left-4 z-10">
-        <ButtonVoltar />
-      </div>
+    <main className="flex flex-col min-h-screen text-white bg-gray-900">
+      {/* Cabeçalho modernizado */}
+      <header className="sticky top-0 z-10 bg-gray-800 p-4 shadow-md flex justify-between items-center">
+        <button
+          onClick={() => window.history.back()}
+          className="flex items-center text-blue-400 hover:text-blue-300 transition-colors"
+        >
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            className="h-6 w-6 mr-2"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M10 19l-7-7m0 0l7-7m-7 7h18"
+            />
+          </svg>
+          Voltar
+        </button>
 
-      <div className="flex flex-col items-center justify-center flex-1 w-full py-8">
-        <h1 className="text-3xl font-bold mb-4">Mapa Acessível</h1>
-        <p className="text-lg mb-8">Navegação com alertas de semáforos</p>
+        <div className="flex items-center space-x-4">
+          <button
+            onClick={() => setModoTeste(!modoTeste)}
+            className={`px-4 py-2 rounded-md font-medium ${
+              modoTeste
+                ? "bg-red-600 hover:bg-red-700"
+                : "bg-green-600 hover:bg-green-700"
+            } transition-colors`}
+          >
+            {modoTeste ? "Desativar Modo Teste" : "Ativar Modo Teste"}
+          </button>
 
-        {loadingPosition && (
-          <div className="mb-4 text-yellow-400">
-            <p>Obtendo sua localização...</p>
-            <p className="text-sm">
-              Certifique-se de permitir o acesso à localização
+          {modoTeste && (
+            <div className="flex items-center">
+              <span className="mr-2">Velocidade:</span>
+              <input
+                type="range"
+                min="0.00001"
+                max="0.001"
+                step="0.00001"
+                value={velocidade}
+                onChange={(e) => setVelocidade(parseFloat(e.target.value))}
+                className="w-32 accent-blue-500"
+              />
+            </div>
+          )}
+        </div>
+      </header>
+
+      {/* Barra de alerta com feedback progressivo */}
+      {alertaAtual && (
+        <div
+          className={`sticky top-16 z-10 p-3 text-center ${getAlertColor(
+            alertaAtual.proximidade
+          )} flex items-center justify-between`}
+        >
+          <div className="flex-1">
+            <p className="font-medium">
+              {getAlertText(alertaAtual.proximidade)}
             </p>
-          </div>
-        )}
-
-        {error && (
-          <div className="mb-4 text-red-400">
-            <p>{error}</p>
-            <p className="text-sm">Mostrando localização padrão</p>
-          </div>
-        )}
-
-        {!loadingPosition && posicao && (
-          <div className="mb-4 bg-gray-800 p-3 rounded-lg">
             <p>
-              Distância do semáforo mais próximo: {Math.round(distanciaProxima)}
-              m
+              {alertaAtual.nome} • {alertaAtual.distancia}m{" "}
+              {alertaAtual.direcao}
             </p>
           </div>
-        )}
+          <button
+            onClick={() =>
+              falar(
+                `Semáforo ${alertaAtual.nome} a ${alertaAtual.distancia} metros ${alertaAtual.direcao}`,
+                alertaAtual.proximidade === "muito_perto"
+              )
+            }
+            className="ml-4 p-2 rounded-full bg-white bg-opacity-20 hover:bg-opacity-30"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              className="h-5 w-5"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+            >
+              <path
+                fillRule="evenodd"
+                d="M9.383 3.076A1 1 0 0110 4v12a1 1 0 01-1.707.707L4.586 13H2a1 1 0 01-1-1V8a1 1 0 011-1h2.586l3.707-3.707a1 1 0 011.09-.217zM14.657 2.929a1 1 0 011.414 0A9.972 9.972 0 0119 10a9.972 9.972 0 01-2.929 7.071 1 1 0 01-1.414-1.414A7.971 7.971 0 0017 10c0-2.21-.894-4.208-2.343-5.657a1 1 0 010-1.414zm-2.829 2.828a1 1 0 011.415 0A5.983 5.983 0 0115 10a5.984 5.984 0 01-1.757 4.243 1 1 0 01-1.415-1.415A3.984 3.984 0 0013 10a3.983 3.983 0 00-1.172-2.828a1 1 0 010-1.415z"
+                clipRule="evenodd"
+              />
+            </svg>
+          </button>
+        </div>
+      )}
 
+      {/* Instruções do modo teste */}
+      {modoTeste && (
+        <div className="fixed bottom-4 left-1/2 transform -translate-x-1/2 bg-yellow-600 text-white px-4 py-2 rounded-full text-sm shadow-lg flex items-center">
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            className="h-4 w-4 mr-2"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M13 10V3L4 14h7v7l9-11h-7z"
+            />
+          </svg>
+          Modo teste ativo • Use as setas para mover • Velocidade:{" "}
+          {velocidade.toFixed(5)}
+        </div>
+      )}
+
+      {/* Mapa */}
+      <div className="flex-1 p-4">
         <LoadScript
           googleMapsApiKey={process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY!}
           libraries={["geometry"]}
-          loadingElement={<div className="text-white">Carregando mapa...</div>}
-          onLoad={() => setIsApiLoaded(true)}
-          onError={() => setError("Falha ao carregar o Google Maps")}
+          onLoad={() => setMapLoaded(true)}
         >
-          {isApiLoaded && (
-            <GoogleMap
-              mapContainerStyle={containerStyle}
-              center={posicao || { lat: -22.2231, lng: -54.8124 }} // Fallback
-              zoom={posicao ? 17 : 15} // Zoom diferente para fallback
-              onLoad={(map) => setMap(map)}
-              onUnmount={() => setMap(null)}
-              options={{
-                streetViewControl: false,
-                mapTypeControl: false,
-                fullscreenControl: false,
-                styles: [
-                  {
-                    featureType: "poi",
-                    elementType: "labels",
-                    stylers: [{ visibility: "off" }],
-                  },
-                ],
-              }}
-            >
-              {posicao && (
-                <>
+          <GoogleMap
+            mapContainerStyle={containerStyle}
+            center={posicao}
+            zoom={17}
+            onLoad={(mapInstance) => {
+              setMap(mapInstance);
+              setMapLoaded(true);
+            }}
+            options={{
+              streetViewControl: false,
+              fullscreenControl: false,
+              styles: mapStyles,
+            }}
+          >
+            {mapLoaded && (
+              <>
+                <Marker
+                  position={posicao}
+                  icon={{
+                    url: "https://maps.google.com/mapfiles/ms/icons/blue-dot.png",
+                    scaledSize: createGoogleMapsSize(40, 40),
+                  }}
+                />
+
+                <Circle
+                  center={posicao}
+                  radius={50}
+                  options={{
+                    strokeColor: "#4285F4",
+                    strokeOpacity: 0.8,
+                    strokeWeight: 2,
+                    fillColor: "#4285F4",
+                    fillOpacity: 0.2,
+                  }}
+                />
+
+                {SEMAFOROS.map((semaforo) => (
                   <Marker
-                    position={posicao}
-                    icon={criarIcone(
-                      "https://maps.google.com/mapfiles/ms/icons/blue-dot.png"
-                    )}
-                  />
-                  <Circle
-                    center={posicao}
-                    radius={30}
-                    options={{
-                      strokeColor: "#FF0000",
-                      strokeOpacity: 0.8,
-                      strokeWeight: 2,
-                      fillColor: "#FF0000",
-                      fillOpacity: 0.15,
+                    key={semaforo.id}
+                    position={semaforo.position}
+                    icon={{
+                      url: "https://maps.google.com/mapfiles/ms/icons/red-dot.png",
+                      scaledSize: createGoogleMapsSize(32, 32),
                     }}
                   />
-                </>
-              )}
-
-              {SEMAFOROS.map((semaforo) => (
-                <Marker
-                  key={semaforo.id}
-                  position={semaforo.position}
-                  icon={criarIcone(
-                    "https://maps.google.com/mapfiles/ms/icons/red-dot.png"
-                  )}
-                />
-              ))}
-            </GoogleMap>
-          )}
+                ))}
+              </>
+            )}
+          </GoogleMap>
         </LoadScript>
-
-        <button
-          onClick={repetirAlerta}
-          className="mt-4 bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition-colors"
-          disabled={!ultimoAlerta.current}
-        >
-          Repetir Alerta
-        </button>
       </div>
     </main>
   );
