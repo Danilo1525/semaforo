@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 // Certifique-se que o caminho para a importação está correto.
-// Se você configurou aliases de caminho no seu `tsconfig.json` (ex: "@/lib/*"),
-// pode usar `@/lib/google-tts`. Caso contrário, use o caminho relativo.
 import { synthesizeSpeech } from "@/lib/google-tss";
 
 export async function POST(req: NextRequest) {
@@ -27,11 +25,16 @@ export async function POST(req: NextRequest) {
         "Content-Length": audioBuffer.length.toString(),
       },
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
+    // CORREÇÃO: 'any' trocado por 'unknown'
     console.error("Erro na rota da API de TTS:", error);
-    return NextResponse.json(
-      { error: error.message || "Erro interno do servidor" },
-      { status: 500 }
-    );
+
+    // Verificação de tipo para acessar a mensagem de erro com segurança
+    let errorMessage = "Ocorreu um erro inesperado";
+    if (error instanceof Error) {
+      errorMessage = error.message;
+    }
+
+    return NextResponse.json({ error: errorMessage }, { status: 500 });
   }
 }
